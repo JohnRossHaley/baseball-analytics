@@ -1,0 +1,19 @@
+# Data files
+data/raw/*.csv
+data/processed/*.csv
+data/exports/*.csv
+data/*.db
+*.db
+
+# Environment
+.venv/
+.env
+
+# PyCharm
+.idea/
+
+# Mac
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
