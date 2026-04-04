@@ -1,7 +1,6 @@
 """
 main.py
 Entry point for the baseball analytics system.
-Run this file to initialize the database and pull your first dataset.
 """
 
 from src.database import initialize_database
@@ -16,49 +15,40 @@ from src.matchup_queries import (
     batter_tendencies
 )
 from src.bullpen_monitor import bullpen_availability
-from src.player_lookup import get_player_id
+from src.player_lookup import get_player_id, populate_all_players
 from src.metrics import calculate_fip, calculate_whip
 
 
-def setup():
+def pull_current_seasons():
     """
-    Full setup sequence.
-    Run this once to initialize the database
-    and pull your first month of Statcast data.
+    Pulls 2025 full season and 2026 season to date.
+    Run this after initial setup is complete.
     """
     print("=" * 50)
-    print("BASEBALL ANALYTICS SYSTEM")
+    print("PULLING CURRENT SEASON DATA")
     print("=" * 50)
 
-    # Step 1 - Initialize database tables
-    print("\n[1/4] Initializing database...")
-    initialize_database()
+    # Pull full 2025 season
+    print("\n[1/3] Pulling 2025 full season...")
+    print("This will take 10-15 minutes - ~700,000 pitches")
+    pull_statcast_range("2025-03-27", "2025-10-01")
 
-    # Step 2 - Pull one month of Statcast data to start
-    print("\n[2/4] Pulling Statcast data...")
-    pull_statcast_range("2024-04-01", "2024-04-30")
+    # Pull 2026 season to date
+    print("\n[2/3] Pulling 2026 season to date...")
+    pull_statcast_range("2026-03-27", "2026-04-03")
 
-    # Step 3 - Build bullpen usage from pitch data
-    print("\n[3/4] Building bullpen usage table...")
+    # Rebuild bullpen usage with all new data
+    print("\n[3/3] Rebuilding bullpen usage table...")
     build_bullpen_usage()
 
-    # Step 4 - Sample player lookups
-    print("\n[4/4] Running sample player lookups...")
-    pull_player_lookup("judge", "aaron")
-    pull_player_lookup("degrom", "jacob")
-    pull_player_lookup("cole", "gerrit")
-
     print("\n" + "=" * 50)
-    print("SETUP COMPLETE")
+    print("SEASON DATA PULL COMPLETE")
     print("=" * 50)
-    print("\nDatabase ready at: data/baseball.db")
-    print("Run sample_analysis() to see your first results")
 
 
 def sample_analysis():
     """
     Sample analysis to verify everything is working.
-    Run this after setup() completes successfully.
     """
     print("=" * 50)
     print("RUNNING SAMPLE ANALYSIS")
@@ -68,42 +58,67 @@ def sample_analysis():
     print("\nLooking up player IDs...")
     cole_id = get_player_id("cole", "gerrit")
     judge_id = get_player_id("judge", "aaron")
+    degrom_id = get_player_id("degrom", "jacob")
 
-    if cole_id and judge_id:
-
-        # Pitcher tendencies
-        print(f"\nGerrit Cole pitch tendencies:")
-        tendencies = pitcher_tendencies(cole_id)
-        print(tendencies.head(10).to_string(index=False))
-
-        # Batter tendencies
+    # Aaron Judge batting tendencies
+    if judge_id:
         print(f"\nAaron Judge batting tendencies:")
         judge_tendencies = batter_tendencies(judge_id)
-        print(judge_tendencies.to_string(index=False))
+        if judge_tendencies.empty:
+            print("No data found for Judge in current date range")
+        else:
+            print(judge_tendencies.to_string(index=False))
 
-        # Cole vs Judge matchup
+    # Gerrit Cole pitch tendencies
+    if cole_id:
+        print(f"\nGerrit Cole pitch tendencies:")
+        cole_tendencies = pitcher_tendencies(cole_id)
+        if cole_tendencies.empty:
+            print("No data found for Cole in current date range")
+        else:
+            print(cole_tendencies.head(15).to_string(index=False))
+
+    # deGrom pitch tendencies
+    if degrom_id:
+        print(f"\nJacob deGrom pitch tendencies:")
+        degrom_tendencies = pitcher_tendencies(degrom_id)
+        if degrom_tendencies.empty:
+            print("No data for deGrom - likely injured during this period")
+        else:
+            print(degrom_tendencies.head(15).to_string(index=False))
+
+    # Cole vs Judge matchup
+    if cole_id and judge_id:
         print(f"\nCole vs Judge matchup breakdown:")
         matchup = pitcher_vs_batter(cole_id, judge_id)
         if matchup.empty:
             print("No head to head data in current date range")
-            print("Pull more data or try a different matchup")
         else:
             print(matchup.to_string(index=False))
 
-        # FIP for Cole
+    # Cole FIP and WHIP
+    if cole_id:
         print(f"\nGerrit Cole FIP by game:")
         fip = calculate_fip(cole_id)
-        print(fip.to_string(index=False))
+        if fip.empty:
+            print("No FIP data available")
+        else:
+            print(fip.to_string(index=False))
 
-        # WHIP for Cole
         print(f"\nGerrit Cole WHIP by game:")
         whip = calculate_whip(cole_id)
-        print(whip.to_string(index=False))
+        if whip.empty:
+            print("No WHIP data available")
+        else:
+            print(whip.to_string(index=False))
 
     # Yankees bullpen availability
     print("\nYankees bullpen availability:")
     availability = bullpen_availability("NYY")
-    print(availability.to_string(index=False))
+    if availability.empty:
+        print("No bullpen data available")
+    else:
+        print(availability.head(15).to_string(index=False))
 
     print("\n" + "=" * 50)
     print("ANALYSIS COMPLETE")
@@ -111,8 +126,9 @@ def sample_analysis():
 
 
 if __name__ == "__main__":
-    # Run setup first time only
-    setup()
-
-    # Uncomment after setup completes successfully
-    # sample_analysis()
+    # Step 1 - Pull current season data
+    # Comment this out after first run
+    # pull_current_seasons()
+    # populate_all_players()
+    # Step 2 - Run analysis
+    sample_analysis()

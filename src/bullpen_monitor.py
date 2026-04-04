@@ -5,12 +5,13 @@ Daily bullpen workload tracking and availability analysis.
 
 import pandas as pd
 from src.database import get_connection
-
+from src.player_lookup import enrich_with_names
 
 def bullpen_availability(team: str, as_of_date: str = None) -> pd.DataFrame:
     """
     Shows bullpen availability for a team based on recent workload.
-    Flags pitchers who may be unavailable due to recent usage.
+    Correctly filters to only pitchers who threw for that team
+    and calculates rolling 7 day and 3 day windows properly.
 
     Args:
         team:        Team abbreviation e.g. 'NYY', 'CHC', 'LAD'
@@ -18,73 +19,146 @@ def bullpen_availability(team: str, as_of_date: str = None) -> pd.DataFrame:
                      most recent date in database
 
     Example:
-        bullpen_availability('NYY', '2024-04-15')
+        bullpen_availability('NYY', '2026-04-03')
     """
     con = get_connection()
 
-    date_filter = (
-        f"= '{as_of_date}'"
-        if as_of_date
-        else "= (SELECT MAX(game_date) FROM pitches)"
-    )
-
     result = con.execute(f"""
-        WITH recent_usage AS (
+        WITH
+
+        -- Step 1: Find the most recent date in the database
+        max_date AS (
+            SELECT MAX(game_date) as latest
+            FROM pitches
+        ),
+
+        -- Step 2: Get the reference date
+        -- Uses as_of_date if provided, otherwise latest in DB
+        ref_date AS (
+            SELECT
+                CASE
+                    WHEN '{as_of_date}' = 'None'
+                    THEN (SELECT latest FROM max_date)
+                    ELSE CAST('{as_of_date}' AS DATE)
+                END as ref
+        ),
+
+        -- Step 3: Identify which team each pitcher threw FOR
+        -- A pitcher throws for the HOME team when pitching in
+        -- the top half of the inning (facing away team batters)
+        -- A pitcher throws for the AWAY team when pitching in
+        -- the bottom half (facing home team batters)
+        pitcher_team AS (
+            SELECT DISTINCT
+                pitcher,
+                game_date,
+                game_pk,
+                CASE
+                    WHEN inning_topbot = 'Top'
+                    THEN home_team
+                    ELSE away_team
+                END as pitching_team,
+                COUNT(*) as pitches_in_game
+            FROM pitches
+            GROUP BY
+                pitcher,
+                game_date,
+                game_pk,
+                CASE
+                    WHEN inning_topbot = 'Top'
+                    THEN home_team
+                    ELSE away_team
+                END
+        ),
+
+        -- Step 4: Filter to only pitchers who threw FOR our team
+        team_pitchers AS (
             SELECT
                 pitcher,
                 game_date,
-                COUNT(*)    as pitches,
-                1           as appearance
-            FROM pitches
-            WHERE home_team = '{team}'
-               OR away_team = '{team}'
-            GROUP BY pitcher, game_date
+                game_pk,
+                pitches_in_game
+            FROM pitcher_team
+            WHERE pitching_team = '{team}'
         ),
-        workload_summary AS (
+
+        -- Step 5: Calculate 7 day rolling window stats
+        rolling_7d AS (
             SELECT
                 pitcher,
-                MAX(game_date)                              as last_used,
-                SUM(appearance)                             as appearances_7d,
-                SUM(pitches)                                as pitches_7d,
-                SUM(CASE
-                    WHEN game_date >= (
-                        SELECT MAX(game_date) FROM pitches
-                    ) - INTERVAL '2 days'
-                    THEN appearance ELSE 0
-                END)                                        as apps_last_3d,
-                SUM(CASE
-                    WHEN game_date >= (
-                        SELECT MAX(game_date) FROM pitches
-                    ) - INTERVAL '2 days'
-                    THEN pitches ELSE 0
-                END)                                        as pitches_last_3d
-            FROM recent_usage
+                COUNT(DISTINCT game_date)   as appearances_7d,
+                SUM(pitches_in_game)        as pitches_7d
+            FROM team_pitchers
+            WHERE game_date >= (
+                SELECT ref - INTERVAL '6 days' FROM ref_date
+            )
+            AND game_date <= (SELECT ref FROM ref_date)
+            GROUP BY pitcher
+        ),
+
+        -- Step 6: Calculate 3 day rolling window stats
+        rolling_3d AS (
+            SELECT
+                pitcher,
+                COUNT(DISTINCT game_date)   as apps_last_3d,
+                SUM(pitches_in_game)        as pitches_last_3d
+            FROM team_pitchers
+            WHERE game_date >= (
+                SELECT ref - INTERVAL '2 days' FROM ref_date
+            )
+            AND game_date <= (SELECT ref FROM ref_date)
+            GROUP BY pitcher
+        ),
+
+        -- Step 7: Get last appearance date for each pitcher
+        last_used AS (
+            SELECT
+                pitcher,
+                MAX(game_date) as last_appearance
+            FROM team_pitchers
             GROUP BY pitcher
         )
+
+        -- Step 8: Combine everything and apply availability logic
         SELECT
-            w.pitcher,
-            w.last_used,
-            w.appearances_7d,
-            w.pitches_7d,
-            w.apps_last_3d,
-            w.pitches_last_3d,
+            r7.pitcher,
+            r7.appearances_7d,
+            r7.pitches_7d,
+            COALESCE(r3.apps_last_3d, 0)        as apps_last_3d,
+            COALESCE(r3.pitches_last_3d, 0)     as pitches_last_3d,
+            lu.last_appearance,
+            (SELECT ref FROM ref_date)           as as_of_date,
+
+            -- Availability logic
             CASE
-                WHEN w.apps_last_3d >= 3
-                    THEN 'UNAVAILABLE - 3 straight days'
-                WHEN w.pitches_last_3d >= 60
-                    THEN 'UNAVAILABLE - High pitch load'
-                WHEN w.apps_last_3d = 2
-                    THEN 'LIMITED - Use with caution'
-                WHEN w.last_used = (
-                    SELECT MAX(game_date) FROM pitches
-                )   THEN 'USED YESTERDAY - Monitor'
+                WHEN COALESCE(r3.apps_last_3d, 0) >= 3
+                    THEN 'UNAVAILABLE - 3 consecutive days'
+                WHEN COALESCE(r3.pitches_last_3d, 0) >= 60
+                    THEN 'UNAVAILABLE - High recent pitch load'
+                WHEN COALESCE(r3.apps_last_3d, 0) = 2
+                    THEN 'LIMITED - Used 2 of last 3 days'
+                WHEN lu.last_appearance = (SELECT ref FROM ref_date)
+                    THEN 'USED TODAY - Monitor'
+                WHEN lu.last_appearance = (SELECT ref FROM ref_date) - 1
+                    THEN 'USED YESTERDAY - Monitor'
                 ELSE 'AVAILABLE'
-            END                                             as availability_status
-        FROM workload_summary w
-        ORDER BY w.apps_last_3d DESC, w.pitches_7d DESC
+            END                                  as availability_status
+
+        FROM rolling_7d r7
+        LEFT JOIN rolling_3d r3
+            ON r7.pitcher = r3.pitcher
+        LEFT JOIN last_used lu
+            ON r7.pitcher = lu.pitcher
+        ORDER BY
+            apps_last_3d DESC,
+            pitches_last_3d DESC
+
     """).df()
 
     con.close()
+
+    # Add player names
+    result = enrich_with_names(result, pitcher_col='pitcher')
     return result
 
 
@@ -115,6 +189,7 @@ def velocity_trend(pitcher_id: int) -> pd.DataFrame:
         ORDER BY game_date ASC, pitches DESC
     """).df()
     con.close()
+    result = enrich_with_names(result, pitcher_col='pitcher')
     return result
 
 
@@ -147,6 +222,7 @@ def inning_by_inning_velo(pitcher_id: int, game_pk: int) -> pd.DataFrame:
         ORDER BY inning ASC, pitches DESC
     """).df()
     con.close()
+    result = enrich_with_names(result, pitcher_col='pitcher')
     return result
 
 
@@ -179,6 +255,7 @@ def consecutive_days_used(team: str) -> pd.DataFrame:
         ORDER BY total_appearances DESC
     """).df()
     con.close()
+    result = enrich_with_names(result, pitcher_col='pitcher')
     return result
 
 
