@@ -11,26 +11,133 @@ from src.database import get_connection
 
 def pull_schedule(season: int, team: str) -> pd.DataFrame:
     """
-    Pulls full season schedule and record for a team.
+    Pulls full season schedule and results for a team
+    and stores in the schedule table.
 
     Example:
         pull_schedule(2025, 'NYY')
+        pull_schedule(2026, 'ARI')
     """
     print(f"Pulling {season} schedule for {team}...")
 
     try:
         df = pb.schedule_and_record(season, team)
     except Exception as e:
-        print(f"Error pulling schedule: {e}")
+        print(f"  Error pulling schedule: {e}")
         return pd.DataFrame()
 
     if df.empty:
-        print(f"No schedule data found for {team} {season}")
+        print(f"  No data found for {team} {season}")
         return df
 
-    print(f"Pulled {len(df)} games for {team} {season}")
-    return df
+    con = get_connection()
 
+    # Clear existing data for this team/season
+    con.execute(f"""
+        DELETE FROM schedule
+        WHERE team = '{team}'
+          AND season = {season}
+    """)
+
+    inserted = 0
+    skipped  = 0
+    errors   = []
+
+    for idx, row in df.iterrows():
+        try:
+            def safe_str(val):
+                if val is None: return None
+                if pd.isna(val) if not isinstance(
+                        val, str) else False: return None
+                return str(val).strip() or None
+
+            def safe_int(val):
+                if val is None: return None
+                try:
+                    if pd.isna(val): return None
+                except Exception:
+                    pass
+                try:
+                    return int(float(str(val)))
+                except Exception:
+                    return None
+
+            def safe_float(val):
+                if val is None: return None
+                try:
+                    if pd.isna(val): return None
+                except Exception:
+                    pass
+                try:
+                    return float(str(val))
+                except Exception:
+                    return None
+
+            # GB — handle 'Tied', 'up X', numeric
+            gb_raw = row.get('GB')
+            games_back = None
+            if gb_raw is not None:
+                try:
+                    if not pd.isna(gb_raw):
+                        gb_str = str(gb_raw).strip()
+                        if gb_str not in ('', 'Tied'):
+                            if gb_str.startswith('up '):
+                                games_back = -float(
+                                    gb_str.replace('up ', '')
+                                )
+                            else:
+                                games_back = float(gb_str)
+                except Exception:
+                    games_back = None
+
+            con.execute("""
+                            INSERT INTO schedule (
+                                season, team, date, home_away,
+                                opponent, result, runs_scored,
+                                runs_allowed, innings, win_loss_record,
+                                rank, games_back, winning_pitcher,
+                                losing_pitcher, save_pitcher,
+                                time, day_night, attendance, streak
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                      ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, [
+                int(season),
+                str(team),
+                safe_str(row.get('Date')),
+                safe_str(row.get('Home_Away')),
+                safe_str(row.get('Opp')),
+                safe_str(row.get('W/L')),
+                safe_int(row.get('R')),
+                safe_int(row.get('RA')),
+                safe_int(row.get('Inn')) or 9,
+                safe_str(row.get('W-L')),
+                safe_int(row.get('Rank')),
+                games_back,
+                safe_str(row.get('Win')),
+                safe_str(row.get('Loss')),
+                safe_str(row.get('Save')),
+                safe_str(row.get('Time')),
+                safe_str(row.get('D/N')),
+                safe_int(row.get('Attendance')),
+                safe_str(row.get('Streak')),
+            ])
+            inserted += 1
+
+        except Exception as e:
+            skipped += 1
+            errors.append(f"Row {idx}: {e}")
+            continue
+
+    con.close()
+
+    print(f"  Stored {inserted} games | "
+          f"Skipped {skipped} for {team} {season}")
+
+    # Show first error if any skips occurred
+    if errors:
+        print(f"  First error: {errors[0]}")
+
+    return df
 
 def pull_standings(season: int) -> pd.DataFrame:
     """

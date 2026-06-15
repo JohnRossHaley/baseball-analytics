@@ -298,12 +298,8 @@ def ad_hoc():
 # ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-
-    # ── First time only ───────────────────────────────────
-    # setup()
-
     # ── Run each morning ──────────────────────────────────
-    # update_to_today()
+    update_to_today()
 
     # ── Refresh season data periodically ─────────────────
     # pull_season_data()
@@ -313,10 +309,10 @@ if __name__ == "__main__":
 
     # ── Daily report — primary output ────────────────────
     # season=None uses all seasons for larger samples
-    run_report(
-        focus_team='ARI',
-        season=None
-    )
+    # run_report(
+    #     focus_team='DET',
+    #     season=None
+    # )
 
     # ── Ad hoc queries ────────────────────────────────────
     # ad_hoc()
